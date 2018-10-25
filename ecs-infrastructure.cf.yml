@@ -1,0 +1,587 @@
+Description: >
+  This template deploys a highly available ECS cluster using an AutoScaling Group, with
+  ECS hosts distributed across multiple Availability Zones.
+
+Parameters:
+
+  ClusterMinSize:
+    Description: How many ECS hosts do you want to initially deploy?
+    Type: Number
+    Default: 2
+
+  InstanceType: 
+    Description: Which instance type should we use to build the ECS cluster?
+    Type: String
+    Default: t2.large
+
+Mappings:
+
+  # These are the latest ECS optimized AMIs as of June 2018:
+  #
+  #   amzn-ami-2018.03.a-amazon-ecs-optimized
+  #   ECS agent:    1.18.0
+  #   Docker:       17.12.1-ce
+  #   ecs-init:     1.18.0-1
+  #
+  # You can find the latest available on this page of our documentation:
+  # http://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-optimized_AMI.html
+  # (note the AMI identifier is region specific)
+  
+  AWSRegionToAMI:
+    us-east-1:
+      AMI: ami-5253c32d
+    us-east-2:
+      AMI: ami-956e52f0
+    us-west-1:
+      AMI: ami-6b81980b
+    us-west-2:
+      AMI: ami-d2f489aa
+    eu-west-1:
+      AMI: ami-c91624b0
+    eu-west-2:
+      AMI: ami-3622cf51
+    eu-west-3:
+      AMI: ami-ca75c4b7
+    eu-central-1:
+      AMI: ami-10e6c8fb
+    ap-northeast-1:
+      AMI: ami-f3f8098c
+    ap-northeast-2:
+      AMI: ami-7c69c112
+    ap-southeast-1:
+      AMI: ami-b75a6acb
+    ap-southeast-2:
+      AMI: ami-bc04d5de
+    ca-central-1:
+      AMI: ami-da6cecbe
+    ap-south-1:
+      AMI: ami-c7072aa8
+    sa-east-1:
+      AMI: ami-a1e2becd
+
+Resources:
+  # This security group defines who/where is allowed to access the Application Load Balancer.
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !ImportValue core-vpc-VPCID
+      GroupDescription: Access to the load balancer that sits in front of ECS
+      # SecurityGroupEgress:
+      #   - CidrIp: 0.0.0.0/0
+      #     IpProtocol: "-1"
+      SecurityGroupIngress:
+        # Allow access from Scania IP addresses (https only)
+        - CidrIp: 138.106.0.0/16
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+        # Allow access from Octopus Deploy
+        - CidrIp: 34.250.1.66/32
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+        # Allow Team Vehicle Performance Jenkins pipe
+        - CidrIp: 52.49.210.74/32
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+        - CidrIp: 34.250.61.41/32
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+        # Allow Team Driver Evaluation Jenkins pipe
+        - CidrIp: 52.16.147.201/32
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+        - CidrIp: 34.248.248.147/32
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+      Tags:
+        - Key: Name
+          Value: 
+            Fn::Join:
+              - "-"
+              - - !Ref AWS::StackName
+                - LoadBalancers
+
+  # This security group defines who/where is allowed to access the ECS hosts directly.
+  # By default we're just allowing access from the load balancer.  If you want to SSH
+  # into the hosts, or expose non-load balanced services you can open their ports here.
+  EcsHostSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !ImportValue core-vpc-VPCID
+      GroupDescription: Access to the ECS hosts and the tasks/containers that run on them
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: "-1"
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - "-"
+              - - !Ref AWS::StackName
+                - EcsHosts
+  
+  # http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-security-group-ingress.html
+  LoadBalancerSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: -1
+      FromPort: 443 # Overwritten by IpProtocol: -1
+      ToPort: 443   # Overwritten by IpProtocol: -1
+      DestinationSecurityGroupId:
+        Fn::GetAtt:
+        - EcsHostSecurityGroup
+        - GroupId
+      GroupId:
+        Fn::GetAtt:
+          - LoadBalancerSecurityGroup
+          - GroupId
+  
+  # # http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-security-group-ingress.html
+  EcsHostSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: -1
+      FromPort: 443 # Overwritten by IpProtocol: -1
+      ToPort: 443   # Overwritten by IpProtocol: -1
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+        - LoadBalancerSecurityGroup
+        - GroupId
+      GroupId:
+        Fn::GetAtt:
+          - EcsHostSecurityGroup
+          - GroupId
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+
+  EcsAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !ImportValue core-vpc-PrivateSubnet1AID
+        - !ImportValue core-vpc-PrivateSubnet1BID
+      LaunchConfigurationName: !Ref EcsLaunchConfiguration
+      Cooldown: '60'
+      MinSize: !Ref ClusterMinSize
+      MaxSize: 10
+      DesiredCapacity: !Ref ClusterMinSize
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - " "
+              - - !Ref AWS::StackName
+                - EcsHost
+          PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT15M
+        WaitOnResourceSignals: true
+
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: cpu-above-75-pct
+      AlarmActions:
+          - !Ref ScaleUpPolicyByHighCpu
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '1'
+      Threshold: '75'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref EcsCluster
+  
+  ScaleUpPolicyByHighCpu:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref EcsAutoScalingGroup
+      Cooldown: '120'
+      ScalingAdjustment: '1'
+
+  HighMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: memory-above-75-pct
+      AlarmActions:
+        - !Ref ScaleUpPolicyByHighMemory
+      MetricName: MemoryReservation
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '1'
+      Threshold: '75'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref EcsCluster
+
+  ScaleUpPolicyByHighMemory:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref EcsAutoScalingGroup
+      Cooldown: '120'
+      ScalingAdjustment: '1'
+  
+  LowMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: memory-below-50-pct
+      AlarmActions:
+        - !Ref ScaleDownPolicyByLowMemory
+      MetricName: MemoryReservation
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '3'
+      Threshold: '50'
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref EcsCluster
+  
+  ScaleDownPolicyByLowMemory:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref EcsAutoScalingGroup
+      Cooldown: '300'
+      ScalingAdjustment: '-1'
+
+  EcsLogs:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      RetentionInDays: 30
+
+  EcsLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !FindInMap [AWSRegionToAMI, !Ref "AWS::Region", AMI]
+      InstanceType: !Ref InstanceType
+      SecurityGroups: 
+        - !Ref EcsHostSecurityGroup
+      IamInstanceProfile: !Ref EcsInstanceProfile
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash
+          yum install -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource EcsLaunchConfiguration
+          /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource EcsAutoScalingGroup
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              awslogs: []
+          files:
+            '/etc/awslogs/awscli.conf':
+              content: !Sub |
+                [default]
+                region = ${AWS::Region}
+                [plugins]
+                cwlogs = cwlogs
+              mode: '000644'
+              owner: root
+              group: root
+            '/etc/awslogs/awslogs.conf':
+              content: !Sub |
+                [general]
+                state_file = /var/lib/awslogs/agent-state
+                [/var/log/messages]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/messages
+                log_stream_name = {instance_id}/var/log/messages
+                log_group_name = ${EcsLogs}
+                [/var/log/secure]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/secure
+                log_stream_name = {instance_id}/var/log/secure
+                log_group_name = ${EcsLogs}
+                [/var/log/cron]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/cron
+                log_stream_name = {instance_id}/var/log/cron
+                log_group_name = ${EcsLogs}
+                [/var/log/cloud-init.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/cloud-init.log
+                log_stream_name = {instance_id}/var/log/cloud-init.log
+                log_group_name = ${EcsLogs}
+                [/var/log/cfn-init.log]
+                datetime_format = %Y-%m-%d %H:%M:%S
+                file = /var/log/cfn-init.log
+                log_stream_name = {instance_id}/var/log/cfn-init.log
+                log_group_name = ${EcsLogs}
+                [/var/log/cfn-hup.log]
+                datetime_format = %Y-%m-%d %H:%M:%S
+                file = /var/log/cfn-hup.log
+                log_stream_name = {instance_id}/var/log/cfn-hup.log
+                log_group_name = ${EcsLogs}
+                [/var/log/cfn-init-cmd.log]
+                datetime_format = %Y-%m-%d %H:%M:%S
+                file = /var/log/cfn-init-cmd.log
+                log_stream_name = {instance_id}/var/log/cfn-init-cmd.log
+                log_group_name = ${EcsLogs}
+                [/var/log/cloud-init-output.log]
+                file = /var/log/cloud-init-output.log
+                log_stream_name = {instance_id}/var/log/cloud-init-output.log
+                log_group_name = ${EcsLogs}
+                [/var/log/dmesg]
+                file = /var/log/dmesg
+                log_stream_name = {instance_id}/var/log/dmesg
+                log_group_name = ${EcsLogs}
+              mode: '000644'
+              owner: root
+              group: root
+            "/etc/cfn/cfn-hup.conf":
+              mode: 000400
+              owner: root
+              group: root
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+            
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.ContainerInstances.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource EcsLaunchConfiguration
+          commands:
+            01_start_ecssd_agent_and_add_instance_to_cluster:
+              command: !Sub |
+                start ecssd_agent
+                echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
+          services:
+            sysvinit:
+              awslogs:
+                enabled: true
+                ensureRunning: true
+                packages:
+                  yum:
+                  - awslogs
+                files:
+                - '/etc/awslogs/awslogs.conf'
+                - '/etc/awslogs/awscli.conf'
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Ref AWS::StackName
+      Subnets:
+        - !ImportValue core-vpc-PublicSubnet1AID
+        - !ImportValue core-vpc-PublicSubnet1BID
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Certificates:
+        - CertificateArn: !ImportValue eu-west-1-certificate
+      Port: 443
+      Protocol: HTTPS
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref DefaultTargetGroup
+
+  # We define a default target group here, as this is a mandatory Parameters
+  # when creating an Application Load Balancer Listener. This is not used, instead
+  # a target group is created per-service in each service template
+  DefaultTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: default
+      VpcId: !ImportValue core-vpc-VPCID
+      Port: 80
+      Protocol: HTTP
+
+  # This IAM Role is attached to all of the ECS hosts. It is based on the default role
+  # published here:
+  # http://docs.aws.amazon.com/AmazonECS/latest/developerguide/instance_IAM_role.html
+  #
+  # You can add other IAM policy statements here to allow access from your ECS hosts
+  # to other AWS services. Please note that this role will be used by ALL containers
+  # running on the ECS host.
+  
+  EcsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      RoleName:
+        Fn::Join:
+          - "-"
+          - - !Ref AWS::StackName
+            - EcsRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "sts:AssumeRole"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "logs:DescribeLogStreams"
+                Resource:
+                  - arn:aws:logs:*:*:*
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 
+        Fn::Join:
+          - "-"
+          - - !Ref AWS::StackName
+            - ECSTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: AmazonECSTaskExecutionRolePolicy
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                # Allow the ECS Tasks to download images from ECR
+                - 'ecr:GetAuthorizationToken'
+                - 'ecr:BatchCheckLayerAvailability'
+                - 'ecr:GetDownloadUrlForLayer'
+                - 'ecr:BatchGetImage'
+
+                # Allow the ECS tasks to upload logs to CloudWatch
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+              Resource: '*'
+      
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EcsRole
+
+Outputs:
+
+  LoadBalancerSecurityGroup:
+    Description: A reference to the security group for load balancers
+    Value: !Ref LoadBalancerSecurityGroup
+
+  Cluster:
+    Description: A reference to the ECS cluster
+    Value: !Ref EcsCluster
+    Export:
+      Name:
+        Fn::Join:
+          - "-"
+          - - !Ref AWS::StackName
+            - EcsCluster
+
+  LoadBalancer:
+    Description: A reference to the Application Load Balancer
+    Value: !Ref LoadBalancer
+
+  LoadBalancerUrl:
+    Description: The URL of the ALB
+    Value: !GetAtt LoadBalancer.DNSName
+    Export:
+      Name:
+        Fn::Join:
+          - "-"
+          - - !Ref AWS::StackName
+            - LoadBalancerUrl
+
+  LoadBalancerHostedZoneID:
+    Description: The ALBs Hosted Zone ID
+    Value: !GetAtt LoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name:
+        Fn::Join:
+          - "-"
+          - - !Ref AWS::StackName
+            - LoadBalancerHostedZoneID
+
+  Listener:
+    Description: A reference to a port 443 listener
+    Value: !Ref LoadBalancerListener
+    Export:
+      Name:
+        Fn::Join:
+          - "-"
+          - - !Ref AWS::StackName
+            - LoadBalancerListener
+
+  EcsLogs:
+    Description: The CloudWatch log group
+    Value: !Ref EcsLogs
+    Export:
+      Name:
+        Fn::Join:
+          - "-"
+          - - !Ref AWS::StackName
+            - EcsLogs
+
+  ECSTaskExecutionRole:
+    Description: A reference to the ECS task execution role
+    Value: !GetAtt ECSTaskExecutionRole.Arn
+    Export:
+      Name:
+        Fn::Join:
+          - "-"
+          - - !Ref AWS::StackName
+            - ECSTaskExecutionRole
+  
+  EcsHostSecurityGroup:
+    Description: ECS host security group
+    Value: !Ref EcsHostSecurityGroup
+    Export:
+      Name:
+        Fn::Join:
+          - "-"
+          - - !Ref AWS::StackName
+            - EcsHostSecurityGroup
+
