@@ -6,12 +6,11 @@ Parameters:
   AWSAccountDev:
     Description: AWS team account number
     Type: String
-    Default: 020683529533
     
   ServiceName:
     Description: The service name
     Type: String
-    Default: dailyopstest
+    Default: test
   
   VCpu:
     Description: Required cpu to run the container
